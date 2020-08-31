@@ -23,11 +23,11 @@
  *
  * File-like output for logging:  stenographer
  */
-#include "suricata-common.h" /* errno.h, string.h, etc. */
+/* errno.h, string.h, etc. */
 #include "util-stenographer.h"
-#include "util-logopenfile.h"
 #include <lz4frame.h>
-
+#include <string.h>
+#include <stdlib.h>
 
 #include <curl/curl.h>
 
@@ -62,48 +62,26 @@ static size_t writefunc(void *contents, size_t size, size_t nmemb, void *userp)
   return realsize;
 }
 
-/**
- * \brief SCLogStenographerInit() - Initializes global stuff before threads
- */
-void SCLogStenographerInit(char *url, long port,
-    char *pCertFile, char *pKeyName, char * pCACertFile)
-{
-  
-
-}
-
-/** \brief SCConfLogReopenAsyncRedis() Open or re-opens connection to redis for logging.
- *  \param log_ctx Log file context allocated by caller
- */
-static int SCConfLogReopenAsyncRedis(LogFileCtx *log_ctx)
-{
-    
-}
-
-
 /* safe_fwrite() :
  * performs fwrite(), ensure operation success, or immediately exit() */
 static void safe_fwrite(void* buf, size_t eltSize, size_t nbElt, FILE* f)
 {
     size_t const writtenSize = fwrite(buf, eltSize, nbElt, f);
     size_t const expectedSize = eltSize * nbElt;
-    assert(expectedSize / nbElt == eltSize);   /* check overflow */
+    //assert(expectedSize / nbElt == eltSize);   /* check overflow */
     if (writtenSize < expectedSize) {
         if (ferror(f))  /* note : ferror() must follow fwrite */
             fprintf(stderr, "Write failed \n");
         else
             fprintf(stderr, "Short write \n");
-        exit(1);
     }
 }
 
 static const LZ4F_preferences_t kPrefs = {
-    { LZ4F_max256KB, LZ4F_blockLinked, LZ4F_noContentChecksum, LZ4F_frame,
-      0 /* unknown content size */, 0 /* no dictID */ , LZ4F_noContentChecksum },
+    { LZ4F_max256KB, LZ4F_blockLinked, LZ4F_noContentChecksum, LZ4F_frame, 0, 0, LZ4F_noContentChecksum },
     0,   /* compression level; 0 == default */
     0,   /* autoflush */
-    0,   /* favor decompression speed */
-    { 0, 0, 0 },  /* reserved, must be set to 0 */
+    { 0, 0, 0, 0 },
 };
 
 
@@ -123,10 +101,10 @@ compress_file_internal(const char* f_in, FILE* f_out,
     compressResult_t result = { 1, 0, 0 };  /* result for an error */
     unsigned long long count_in = 0, count_out;
 
-    assert(f_in != NULL); assert(f_out != NULL);
-    assert(ctx != NULL);
-    assert(outCapacity >= LZ4F_HEADER_SIZE_MAX);
-    assert(outCapacity >= LZ4F_compressBound(inChunkSize, &kPrefs));
+    //assert(f_in != NULL); assert(f_out != NULL);
+    //assert(ctx != NULL);
+    //assert(outCapacity >= 15);
+    //assert(outCapacity >= LZ4F_compressBound(inChunkSize, &kPrefs));
 
     /* write frame header */
     {   size_t const headerSize = LZ4F_compressBegin(ctx, outBuff, outCapacity, &kPrefs);
@@ -188,9 +166,6 @@ compress_file_internal(const char* f_in, FILE* f_out,
  */
 int LogStenographerFileWrite(void *lf_ctx, const char *file_path, const char* start_time, const char* end_time)
 {
-
-
-
   struct MemoryStruct chunk;
   chunk.memory = malloc(1);  /* will be grown as needed by realloc above */ 
   chunk.size = 0;
@@ -209,7 +184,7 @@ int LogStenographerFileWrite(void *lf_ctx, const char *file_path, const char* st
 
   char *postthis = (char *)malloc(70 * sizeof(char)); 
   sprintf(postthis, "after %s and before %s", start_time, end_time);  
-  printf("reauest: %s\n", postthis);
+  //printf("reauest: %s\n", postthis);
 
   curl = curl_easy_init();
   if(curl) {
@@ -284,22 +259,4 @@ int LogStenographerFileWrite(void *lf_ctx, const char *file_path, const char* st
     curl_easy_cleanup(curl);
   }
 
-}
-
-/** \brief configure and initializes redis output logging
- *  \param conf ConfNode structure for the output section in question
- *  \param log_ctx Log file context allocated by caller
- *  \retval 0 on success
- */
-int SCConfLogOpenRedis(ConfNode *redis_node, void *lf_ctx)
-{
-
-}
-
-/** \brief SCLogFileCloseRedis() Closes redis log more
- *  \param log_ctx Log file context allocated by caller
- */
-void SCLogFileCloseRedis(LogFileCtx *log_ctx)
-{
-  curl_global_cleanup();
 }

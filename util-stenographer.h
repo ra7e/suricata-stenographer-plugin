@@ -24,28 +24,29 @@
 #ifndef __UTIL_STENOGRAPHER_H__
 #define __UTIL_STENOGRAPHER_H__
 
+#include <stdint.h>
+#include <stdio.h>
 
 /**
  * This holds global structures and variables. 
  */
 typedef struct AlertStenographerCtx_ {
-    //LogFileCtx *logfile_ctx;
-    char *pcap_dir;
+    const char *pcap_dir;
     uint32_t before_time;
     uint32_t after_time;
     int compression;
     int no_overlapping;
     int cleanup;
-    char *cleanup_script;
+    const char *cleanup_script;
     unsigned long cleanup_expiry_time;
     unsigned long min_disk_space_left;
+    FILE *fptr;
 } AlertStenographerCtx;
 
 #include <curl/curl.h>
 
 void SCLogStenographerInit(char *url, long port,
     char *pCertFile, char *pKeyName, char * pCACertFile);
-int SCConfLogOpenStenographer(ConfNode *, void *);
 int LogStenographerFileWrite(void *lf_ctx, const char *file_path, const char* start_time, const char* end_time);
 
 #endif /* __UTIL_STENOGRAPHER_H__ */

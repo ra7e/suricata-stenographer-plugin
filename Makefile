@@ -8,7 +8,7 @@ CPPFLAGS +=	-DSURICATA_PLUGIN -I.
 LDLIBS += -lcurl
 
 all:
-	$(CC) -fPIC $(CPPFLAGS) -o eve-filetype.so -shared $(SRCS) $(LDLIBS)
+	$(CC) -fPIC $(CPPFLAGS) -o eve-stenographer.so -shared $(SRCS) $(LDLIBS)
 
 clean:
 	rm -f *.so *~
