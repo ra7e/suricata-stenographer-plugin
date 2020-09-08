@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
-
-
+#include "util-misc.h"
+#include "util-time.h"
 #include "suricata-plugin.h"
 #include "util-debug.h"
 #include "util-stenographer.h"
@@ -11,6 +11,7 @@
 
 static long last_alert_sec;
 
+int CleanupOldest (const char *dirname, time_t expiry, const char * script_before_cleanup);
 
 #include <sys/statvfs.h>
 #include <time.h>
@@ -287,7 +288,7 @@ const SCPlugin PluginSpec = {
 #include <dirent.h>
 #include <sys/stat.h>
 
-int CleanupOldest (char *dirname, time_t expiry, char * script_before_cleanup) {
+int CleanupOldest (const char *dirname, time_t expiry,const char * script_before_cleanup) {
 
     int script_run = 0;
     DIR * directory; 
