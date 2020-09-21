@@ -345,14 +345,6 @@ int CleanupOldest (const char *dirname, time_t expiry,const char * script_before
                 num_ents ++;
             }
         }
-        /*else if (S_ISDIR(buf.st_mode)) {
-               
-            if (CleanupOldest(filename, expiry) == 0) {
-                   
-                rmdir(filename); 
-                num_ents ++;
-            }
-        }*/
     }
     closedir(directory);
     chdir("..");
