@@ -9,7 +9,7 @@
 #include "util-stenographer.h"
 
 
-#define OUTPUT_NAME "stenographer"
+#define OUTPUT_NAME "stenographer-plugin"
 
 static long last_alert_sec;
 
@@ -184,7 +184,7 @@ static int TemplateOpen(ConfNode *conf, void **data) {
     if (s_before_time != NULL) {
             if (ParseSizeStringU32(s_before_time, &before_time) < 0) {
                 SCLogError(SC_ERR_INVALID_ARGUMENT,
-                    "Failed to initialize pcap output, invalid limit: %s",
+                    "Failed to initialize pcap output, invalid limit: %d",
                     before_time);
                 exit(EXIT_FAILURE);
             }
@@ -194,7 +194,7 @@ static int TemplateOpen(ConfNode *conf, void **data) {
     if (s_after_time != NULL) {
             if (ParseSizeStringU32(s_after_time, &after_time) < 0) {
                 SCLogError(SC_ERR_INVALID_ARGUMENT,
-                    "Failed to initialize pcap output, invalid limit: %s",
+                    "Failed to initialize pcap output, invalid limit: %d",
                     after_time);
                 exit(EXIT_FAILURE);
             }
@@ -234,7 +234,7 @@ static int TemplateOpen(ConfNode *conf, void **data) {
         if (s_expiry_time != NULL) {
             if (ParseSizeStringU64(s_expiry_time, &expiry_time) < 0) {
                 SCLogError(SC_ERR_INVALID_ARGUMENT,
-                    "Failed to initialize pcap output, invalid limit: %s",
+                    "Failed to initialize pcap output, invalid limit: %d",
                     after_time);
                 exit(EXIT_FAILURE);
             }
@@ -245,7 +245,7 @@ static int TemplateOpen(ConfNode *conf, void **data) {
         if (s_min_disk_space_left != NULL) {
             if (ParseSizeStringU64(s_min_disk_space_left, &min_disk_space_left) < 0) {
                 SCLogError(SC_ERR_INVALID_ARGUMENT,
-                    "Failed to initialize pcap output, invalid limit: %s",
+                    "Failed to initialize pcap output, invalid limit: %d",
                     after_time);
                 exit(EXIT_FAILURE);
             }
