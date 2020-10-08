@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h> 
 #include "util-misc.h"
 #include "util-time.h"
 #include "suricata-plugin.h"
@@ -277,13 +279,17 @@ void TemplateInit(void)
     }
 }
 
-const SCPlugin PluginSpec = {
+const SCPlugin PluginRegistration = {
     .name = OUTPUT_NAME,
     .author = "Vadym Malakhatko <v.malakhatko@sirinsoftware.com>",
     .license = "GPLv2",
     .Init = TemplateInit,
 };
 
+const SCPlugin *SCPluginRegister()
+{
+    return &PluginRegistration;
+}
 
 #include <dirent.h>
 #include <sys/stat.h>
