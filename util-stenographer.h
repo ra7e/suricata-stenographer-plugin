@@ -26,6 +26,8 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <curl/curl.h>
+#include <unistd.h>
 
 /**
  * This holds global structures and variables. 
@@ -44,6 +46,29 @@ typedef struct AlertStenographerCtx_ {
 } AlertStenographerCtx;
 
 #include <curl/curl.h>
+
+static int IsDirectoryWritable(const char* dir)
+{
+    if (access(dir, W_OK) == 0)
+        return 1;
+    return 0;
+}
+
+static int IsFileExist(const char* fname)
+{
+    if( access(fname, F_OK) == 0 ) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+static int IsLogDirectoryWritable(const char* str)
+{
+    if (access(str, W_OK) == 0)
+        return 1;
+    return 0;
+}
 
 void SCLogStenographerInit(char *url, long port,
     char *pCertFile, char *pKeyName, char * pCACertFile);

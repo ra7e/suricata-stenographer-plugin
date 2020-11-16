@@ -1,4 +1,4 @@
-#include <stdio.h>
+ #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h> 
@@ -7,7 +7,8 @@
 #include "suricata-plugin.h"
 #include "util-debug.h"
 #include "util-stenographer.h"
-
+#include <dirent.h>
+#include <sys/stat.h>
 
 #define OUTPUT_NAME "stenographer-plugin"
 
@@ -172,33 +173,47 @@ static void TemplateClose(void *data) {
 static int TemplateOpen(ConfNode *conf, void **data) {
     AlertStenographerCtx *ctx;
     
-    const char * pcap_dir = ConfNodeLookupChildValue(conf, "pcap-dir");
+        const char * pcap_dir = ConfNodeLookupChildValue(conf, "pcap-dir");
+
+    if (ConfigCheckLogDirectoryExists(pcap_dir) != TM_ECODE_OK) {
+        SCLogError(SC_ERR_LOGDIR_CONFIG, "Stenographer pcap logging directory \"%s\" "
+                "doesn't exist. Shutting down the engine", pcap_dir);
+        exit(EXIT_FAILURE);
+    }
+
+    if (!IsDirectoryWritable(pcap_dir)) {
+        SCLogError(SC_ERR_LOGDIR_CONFIG, "Stenographer pcap logging directory \"%s\" "
+                "is not writable. Shutting down the engine", pcap_dir);
+        exit(EXIT_FAILURE);
+    }
+
     const char * log_file = ConfNodeLookupChildValue(conf, "filename");
     FILE *fptr = fopen(log_file, "w");
     if (fptr == NULL) {
-        exit(1);
+        SCLogError(SC_ERR_LOGDIR_CONFIG, "Stenographer logging file \"%s\" "
+                "cannot be created. Shutting down the engine", log_file);
+        exit(EXIT_FAILURE);
     }
+
     const char * s_before_time = ConfNodeLookupChildValue(conf, "before-time");
 
     uint32_t before_time = 0;
     if (s_before_time != NULL) {
-            if (ParseSizeStringU32(s_before_time, &before_time) < 0) {
-                SCLogError(SC_ERR_INVALID_ARGUMENT,
-                    "Failed to initialize pcap output, invalid limit: %d",
-                    before_time);
+        if (ParseSizeStringU32(s_before_time, &before_time) < 0) {
+            SCLogError(SC_ERR_INVALID_ARGUMENT,
+                "Failed to initialize pcap output, invalid limit: %d", before_time);
                 exit(EXIT_FAILURE);
-            }
         }
+    }
     const char * s_after_time = ConfNodeLookupChildValue(conf, "after-time");
     uint32_t after_time = 0;
     if (s_after_time != NULL) {
-            if (ParseSizeStringU32(s_after_time, &after_time) < 0) {
-                SCLogError(SC_ERR_INVALID_ARGUMENT,
-                    "Failed to initialize pcap output, invalid limit: %d",
-                    after_time);
-                exit(EXIT_FAILURE);
-            }
+        if (ParseSizeStringU32(s_after_time, &after_time) < 0) {
+            SCLogError(SC_ERR_INVALID_ARGUMENT,
+                "Failed to initialize pcap output, invalid limit: %d", after_time);
+            exit(EXIT_FAILURE);
         }
+    }
 
     int compression = 0;
     const char * s_compression = ConfNodeLookupChildValue(conf, "compression");
@@ -228,6 +243,12 @@ static int TemplateOpen(ConfNode *conf, void **data) {
 
         if (script != NULL) {
             cleanup_script = script;
+        }
+
+        if (IsFileExist(cleanup_script) != TM_ECODE_OK) {
+            SCLogError(SC_ERR_LOGDIR_CONFIG, "Stenographer cleanup script \"%s\" "
+                "doesn't exist. Shutting down the engine", pcap_dir);
+                exit(EXIT_FAILURE);
         }
         const char * s_expiry_time = ConfNodeLookupChildValue(cleanup_node, "expiry-time");
     
@@ -266,33 +287,6 @@ static int TemplateOpen(ConfNode *conf, void **data) {
     *data = ctx;
     return 0;
 }
-
-void TemplateInit(void)
-{
-    SCPluginFileType *my_output = SCCalloc(1, sizeof(SCPluginFileType));
-    my_output->name = OUTPUT_NAME;
-    my_output->Open = TemplateOpen;
-    my_output->Write = TemplateWrite;
-    my_output->Close = TemplateClose;
-    if (!SCPluginRegisterFileType(my_output)) {
-        FatalError(SC_ERR_PLUGIN, "Failed to register filetype plugin: %s", OUTPUT_NAME);
-    }
-}
-
-const SCPlugin PluginRegistration = {
-    .name = OUTPUT_NAME,
-    .author = "Vadym Malakhatko <v.malakhatko@sirinsoftware.com>",
-    .license = "GPLv2",
-    .Init = TemplateInit,
-};
-
-const SCPlugin *SCPluginRegister()
-{
-    return &PluginRegistration;
-}
-
-#include <dirent.h>
-#include <sys/stat.h>
 
 int CleanupOldest (const char *dirname, time_t expiry,const char * script_before_cleanup) {
 
@@ -357,6 +351,26 @@ int CleanupOldest (const char *dirname, time_t expiry,const char * script_before
     return num_ents;
 }
 
-int CleanupNeeded() {
-    return 1;
+void TemplateInit(void)
+{
+    SCPluginFileType *my_output = SCCalloc(1, sizeof(SCPluginFileType));
+    my_output->name = OUTPUT_NAME;
+    my_output->Open = TemplateOpen;
+    my_output->Write = TemplateWrite;
+    my_output->Close = TemplateClose;
+    if (!SCPluginRegisterFileType(my_output)) {
+        FatalError(SC_ERR_PLUGIN, "Failed to register filetype plugin: %s", OUTPUT_NAME);
+    }
+}
+
+const SCPlugin PluginRegistration = {
+    .name = OUTPUT_NAME,
+    .author = "Vadym Malakhatko <v.malakhatko@sirinsoftware.com>",
+    .license = "GPLv2",
+    .Init = TemplateInit,
+};
+
+const SCPlugin *SCPluginRegister()
+{
+    return &PluginRegistration;
 }
