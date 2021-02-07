@@ -28,6 +28,10 @@
 #include <stdio.h>
 #include <curl/curl.h>
 #include <unistd.h>
+#include <pthread.h>
+
+#include "cQueue.h"
+#define	IMPLEMENTATION	LIFO
 
 /**
  * This holds global structures and variables. 
@@ -40,10 +44,27 @@ typedef struct AlertStenographerCtx_ {
     int no_overlapping;
     int cleanup;
     const char *cleanup_script;
+    const char *client_cert;
+    const char *client_key;
+    const char *ca_cert;
     unsigned long cleanup_expiry_time;
     unsigned long min_disk_space_left;
     FILE *fptr;
+    
+    pthread_mutex_t pcap_saver_mutex;
+    pthread_t pcap_saver_thread;
+    Queue_t	alert_queue;
+    
+    pthread_cond_t new_alert;
+
 } AlertStenographerCtx;
+
+typedef struct Alert_ {
+	struct timeval start_time;
+	struct timeval end_time;
+    struct timeval alert_time;
+    const char *buffer;
+} Alert;
 
 #include <curl/curl.h>
 
@@ -56,7 +77,7 @@ static int IsDirectoryWritable(const char* dir)
 
 static int IsFileExist(const char* fname)
 {
-    if( access(fname, F_OK) == 0 ) {
+    if(access(fname, F_OK) == 0 ) {
         return 1;
     } else {
         return 0;

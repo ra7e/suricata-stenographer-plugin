@@ -1,4 +1,4 @@
- #include <stdio.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h> 
@@ -12,9 +12,7 @@
 
 #define OUTPUT_NAME "stenographer-plugin"
 
-static long last_alert_sec;
-
-int CleanupOldest (const char *dirname, time_t expiry, const char * script_before_cleanup);
+int CleanupOldest (const char *dirname, time_t expiry, const char * script_before_cleanup, FILE *fptr);
 
 #include <sys/statvfs.h>
 #include <time.h>
@@ -53,15 +51,99 @@ long GetAvailableDiskSpace(const char* path) {
  * holding multiple alerts. */
 #define MAX_STENOGRAPHER_BUFFER_SIZE (2 * MAX_STENOGRAPHER_ALERT_SIZE)
 
+void* savePcap(void *data) {
+    AlertStenographerCtx *ctx = (AlertStenographerCtx *)data;
+    
+    while (1) {
+
+        sleep(1);
+        pthread_mutex_lock(&ctx->pcap_saver_mutex);
+        Alert current_alert;
+        struct timeval current_time;
+        gettimeofday(&current_time, NULL);
+        while(!q_isEmpty(&ctx->alert_queue)) {
+            
+        if(!q_peek(&ctx->alert_queue, &current_alert)) {
+            goto end_current_check;
+        }
+
+        // cannot create pcap now (end time is in future (cannot save packets from future))
+        if (current_alert.end_time.tv_sec > current_time.tv_sec) {
+            pthread_mutex_unlock(&ctx->pcap_saver_mutex);
+            goto end_current_check;
+        }
+        
+        q_pop(&ctx->alert_queue, &current_alert);
+        
+        char timebuf[64];
+        
+        CreateTimeString(&current_alert.alert_time, timebuf, sizeof(timebuf));
+        
+        char stenographerPcapAlertFile[64];
+        //sprintf(stenographerPcapAlertFile, "%s-%s-%s", "alert", "test", timebuf);
+        CreateIsoTimeString(&current_alert.alert_time, stenographerPcapAlertFile, sizeof(stenographerPcapAlertFile));
+        
+        
+        char alert_buffer[MAX_STENOGRAPHER_BUFFER_SIZE];
+        fprintf(ctx->fptr, "%s\n", current_alert.buffer);
+        
+        if(ctx->compression) {
+            fprintf(ctx->fptr, "Alert Pcap saved to file : %s.lz4 \n", stenographerPcapAlertFile);
+        }
+        else {
+            fprintf(ctx->fptr, "Alert Pcap saved to file : %s.pcap \n", stenographerPcapAlertFile);
+        }
+        fflush(ctx->fptr);
+
+        char end_timebuf[64];
+        CreateIsoTimeStringNoMS(&current_alert.end_time, end_timebuf, sizeof(end_timebuf));
+        
+        char start_timebuf[64];
+        CreateIsoTimeStringNoMS(&current_alert.start_time, start_timebuf, sizeof(start_timebuf));
+
+        if(ctx->cleanup) {
+            if(ctx->cleanup_expiry_time) {
+                int files_deleted = CleanupOldest(ctx->pcap_dir, ctx->cleanup_expiry_time, ctx->cleanup_script, ctx->fptr);
+                if(files_deleted) {
+                    char cleanup_message[MAX_STENOGRAPHER_BUFFER_SIZE];
+                    int cleanup_size = 0;
+                    snprintf(cleanup_message, MAX_STENOGRAPHER_ALERT_SIZE,
+                        "%s Cleanup of the folder '%s' is finished, %d file(s) older than %lu seconds were deleted \n", timebuf, ctx->pcap_dir, files_deleted, ctx->cleanup_expiry_time);
+                    fprintf(ctx->fptr, "%s", cleanup_message);
+                }
+            }
+            if(ctx->min_disk_space_left) {
+                if(ctx->min_disk_space_left > GetAvailableDiskSpace(ctx->pcap_dir)) {
+                    int files_deleted = CleanupOldest(ctx->pcap_dir, 0, ctx->cleanup_script, ctx->fptr);
+                    if(files_deleted) {
+                        char cleanup_message[MAX_STENOGRAPHER_BUFFER_SIZE];
+                        int cleanup_size = 0;
+                        snprintf(cleanup_message, MAX_STENOGRAPHER_ALERT_SIZE,
+                            "%s Cleanup of the folder '%s' is finished, %d file(s) were deleted, %lu bytes of empty space left \n", timebuf, ctx->pcap_dir, files_deleted, GetAvailableDiskSpace(ctx->pcap_dir));
+                        fprintf(ctx->fptr, "%s", cleanup_message);
+                    }
+                }
+            }
+        }
+            LogStenographerFileWrite((void *)ctx, stenographerPcapAlertFile, start_timebuf, end_timebuf);
+        }
+        end_current_check:
+        pthread_mutex_unlock(&ctx->pcap_saver_mutex);
+
+    }
+}
+
 static int TemplateWrite(const char *buffer, int buffer_len, void *data) {
 
     json_t *root;
     json_error_t error;
+    AlertStenographerCtx *ctx = data;
 
     root = json_loadb(buffer, buffer_len, 0, &error);
 
     if (root) {
         json_t * type = json_object_get(root, "event_type");
+        json_t * proto = json_object_get(root, "proto");
         if (strcmp(json_string_value(type), "alert") != 0) {
             json_decref(root);
             return 0;
@@ -71,92 +153,26 @@ static int TemplateWrite(const char *buffer, int buffer_len, void *data) {
         return 0;
     }
     json_decref(root);
-        
-    AlertStenographerCtx *ctx = data;
+    
     int i;
-    char timebuf[64];
     int decoder_event = 0;
     struct timeval current_time;
     gettimeofday(&current_time, NULL);
 
-    CreateTimeString(&current_time, timebuf, sizeof(timebuf));
-
-    char stenographerPcapAlertFile[64];
-    CreateIsoTimeString(&current_time, stenographerPcapAlertFile, sizeof(stenographerPcapAlertFile));
-
-    char alert_buffer[MAX_STENOGRAPHER_BUFFER_SIZE];
-       
-    fprintf(ctx->fptr, "%s\n", buffer);
-
-    if(ctx->compression) {
-        fprintf(ctx->fptr, "Alert Pcap saved to file : %s.lz4 \n", stenographerPcapAlertFile);
-    }
-    else {
-        fprintf(ctx->fptr, "Alert Pcap saved to file : %s.pcap \n", stenographerPcapAlertFile);
-    }
-    
-
-        
     struct timeval end_time;
     end_time.tv_sec = current_time.tv_sec + ctx->after_time;
     end_time.tv_usec = current_time.tv_usec;
-    char end_timebuf[64];
-    CreateIsoTimeStringNoMS(&end_time, end_timebuf, sizeof(end_timebuf));
-        
-        struct timeval start_time;
-        start_time.tv_sec = current_time.tv_sec - ctx->before_time;
-        start_time.tv_usec = current_time.tv_usec;
-        if(ctx->no_overlapping) {
-            if (start_time.tv_sec < last_alert_sec) {
-                start_time.tv_sec = last_alert_sec;
-                last_alert_sec = end_time.tv_sec;
-            }
-        }
-        char start_timebuf[64];
-        CreateIsoTimeStringNoMS(&start_time, start_timebuf, sizeof(start_timebuf));
-
-        
-        pid_t pid = fork();
-        if (pid == 0) {
-            if(ctx->cleanup) {
-            if(ctx->cleanup_expiry_time) {
-                int files_deleted = CleanupOldest(ctx->pcap_dir, ctx->cleanup_expiry_time, ctx->cleanup_script);
-                if(files_deleted) {
-                    char cleanup_message[MAX_STENOGRAPHER_BUFFER_SIZE];
-                    int cleanup_size = 0;
-                    snprintf(cleanup_message, MAX_STENOGRAPHER_ALERT_SIZE,
-                        "%s Cleanup of the folder '%s' is finished, %d file(s) older than %lu seconds were deleted \n", timebuf, ctx->pcap_dir, files_deleted, ctx->cleanup_expiry_time);
-                    fprintf(ctx->fptr, "%s", cleanup_message);
-                }
-            }
-
-            if(ctx->min_disk_space_left) {
-                
-                if(ctx->min_disk_space_left > GetAvailableDiskSpace(ctx->pcap_dir)) {
-                    int files_deleted = CleanupOldest(ctx->pcap_dir, 0, ctx->cleanup_script);
-                    if(files_deleted) {
-                        char cleanup_message[MAX_STENOGRAPHER_BUFFER_SIZE];
-                        int cleanup_size = 0;
-                        snprintf(cleanup_message, MAX_STENOGRAPHER_ALERT_SIZE,
-                            "%s Cleanup of the folder '%s' is finished, %d file(s) were deleted, %lu bytes of empty space left \n", timebuf, ctx->pcap_dir, files_deleted, GetAvailableDiskSpace(ctx->pcap_dir));
-                        fprintf(ctx->fptr, "%s", cleanup_message);
-                        
-                    }
-                }
-            }
-            }
-
-            struct timeval current_time;
-            gettimeofday(&current_time, NULL);
-            while (current_time.tv_sec < (end_time.tv_sec + 60)) {
-                gettimeofday(&current_time, NULL);
-                sleep(1);
-            }
-            
-            LogStenographerFileWrite((void *)ctx, stenographerPcapAlertFile, start_timebuf, end_timebuf);
-            exit(0);
-        }
     
+    struct timeval start_time;
+    start_time.tv_sec = current_time.tv_sec - ctx->before_time;
+    start_time.tv_usec = current_time.tv_usec;
+
+    Alert alert = {start_time, end_time, current_time, buffer};
+
+    pthread_mutex_lock(&ctx->pcap_saver_mutex);
+    q_push(&ctx->alert_queue, &alert);
+    pthread_mutex_unlock(&ctx->pcap_saver_mutex);
+
     return 0;
 }
 
@@ -168,13 +184,14 @@ static void TemplateClose(void *data) {
         fclose(ctx->fptr);
         SCFree(ctx);
     }
+    pthread_cancel(ctx->pcap_saver_thread);
+    
 }
 
 static int TemplateOpen(ConfNode *conf, void **data) {
     AlertStenographerCtx *ctx;
     
-        const char * pcap_dir = ConfNodeLookupChildValue(conf, "pcap-dir");
-
+    const char * pcap_dir = ConfNodeLookupChildValue(conf, "pcap-dir");
     if (ConfigCheckLogDirectoryExists(pcap_dir) != TM_ECODE_OK) {
         SCLogError(SC_ERR_LOGDIR_CONFIG, "Stenographer pcap logging directory \"%s\" "
                 "doesn't exist. Shutting down the engine", pcap_dir);
@@ -188,10 +205,17 @@ static int TemplateOpen(ConfNode *conf, void **data) {
     }
 
     const char * log_file = ConfNodeLookupChildValue(conf, "filename");
-    FILE *fptr = fopen(log_file, "w");
+    FILE *fptr = fopen(log_file, "a");
     if (fptr == NULL) {
         SCLogError(SC_ERR_LOGDIR_CONFIG, "Stenographer logging file \"%s\" "
                 "cannot be created. Shutting down the engine", log_file);
+        exit(EXIT_FAILURE);
+    }
+
+    const char * cert_dir = ConfNodeLookupChildValue(conf, "cert-dir");
+    if (ConfigCheckLogDirectoryExists(cert_dir) != TM_ECODE_OK) {
+        SCLogError(SC_ERR_LOGDIR_CONFIG, "Stenographer cert directory \"%s\" "
+                "doesn't exist. Shutting down the engine", pcap_dir);
         exit(EXIT_FAILURE);
     }
 
@@ -273,6 +297,9 @@ static int TemplateOpen(ConfNode *conf, void **data) {
         }
     }
     ctx = SCMalloc(sizeof(AlertStenographerCtx));
+    q_init(&ctx->alert_queue, sizeof(Alert), UINT16_MAX, IMPLEMENTATION, true);
+    pthread_cond_init(&ctx->new_alert, NULL);
+    
     ctx->pcap_dir = pcap_dir;
     ctx->before_time = before_time;
     ctx->after_time = after_time;
@@ -280,15 +307,31 @@ static int TemplateOpen(ConfNode *conf, void **data) {
     ctx->no_overlapping = no_overlapping;
     ctx->cleanup = cleanup;
     ctx->cleanup_script = cleanup_script;
+    
+    char *client_cert = (char *)malloc(strlen(cert_dir) + 15);
+    sprintf(client_cert, "%s%s", cert_dir, "client_cert.pem");
+    char *client_key = (char *)malloc(strlen(cert_dir) + 14);
+    sprintf(client_key, "%s%s", cert_dir, "client_key.pem");
+    char *ca_cert = (char *)malloc(strlen(cert_dir) + 11);
+    sprintf(ca_cert, "%s%s", cert_dir, "ca_cert.pem");
+
+    ctx->client_cert = client_cert;
+    ctx->client_key = client_key;
+    ctx->ca_cert = ca_cert;
+
+    
     ctx->cleanup_expiry_time = expiry_time;
     ctx->min_disk_space_left = min_disk_space_left;
     ctx->fptr = fptr;
 
     *data = ctx;
+
+    pthread_create(&ctx->pcap_saver_thread, NULL, savePcap, (void *)ctx);
+    pthread_mutex_init ( &ctx->pcap_saver_mutex, NULL);
     return 0;
 }
 
-int CleanupOldest (const char *dirname, time_t expiry,const char * script_before_cleanup) {
+int CleanupOldest (const char *dirname, time_t expiry,const char * script_before_cleanup, FILE * fptr) {
 
     int script_run = 0;
     DIR * directory; 
@@ -303,13 +346,13 @@ int CleanupOldest (const char *dirname, time_t expiry,const char * script_before
     /* Open target directory */
     directory = opendir(dirname);
     if (directory == NULL) {
-        fprintf(stderr, "%s: ", dirname);
-        perror ("Unable to read directory");
+        //fprintf(stderr, "%s: ", dirname);
+        fprintf(fptr, "Unable to read directory");
         return -1;
     }
     if ((chdir(dirname) == -1)) {
-        fprintf(stderr, "%s: ", dirname);
-        perror("chdir failed");
+        //fprintf(stderr, "%s: ", dirname);
+        fprintf(fptr, "chdir failed");
         return -1;
     }
   
@@ -328,8 +371,8 @@ int CleanupOldest (const char *dirname, time_t expiry,const char * script_before
     
         retcode = lstat(filename, &buf);
         if (retcode == -1) {
-            fprintf(stderr, "%s: ", filename);
-            perror("stat failed");
+            //fprintf(stderr, "%s: ", filename);
+            fprintf(fptr, "stat failed");
             continue;
         }
 

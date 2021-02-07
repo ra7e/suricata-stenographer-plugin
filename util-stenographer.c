@@ -33,9 +33,9 @@
 
 static const char * stenographer_url = "https://127.0.0.1/query";
 static long  stenographer_port = 1234L;
-static const char * stenographer_client_cert_file_path = "/etc/stenographer/certs/client_cert.pem";
-static const char * stenographer_client_key_file_path = "/etc/stenographer/certs/client_key.pem";
-static const char * stenographer_ca_cert_file_path = "/etc/stenographer/certs/ca_cert.pem";
+static const char * stenographer_client_cert_file_path = "/etc/nsm/stenographer/certs/client_cert.pem";
+static const char * stenographer_client_key_file_path = "/etc/nsm/stenographer/certs/client_key.pem";
+static const char * stenographer_ca_cert_file_path = "/etc/nsm/stenographer/certs/ca_cert.pem";
 
 struct MemoryStruct {
   char *memory;
@@ -64,16 +64,17 @@ static size_t writefunc(void *contents, size_t size, size_t nmemb, void *userp)
 
 /* safe_fwrite() :
  * performs fwrite(), ensure operation success, or immediately exit() */
-static void safe_fwrite(void* buf, size_t eltSize, size_t nbElt, FILE* f)
+static void safe_fwrite(void* buf, size_t eltSize, size_t nbElt, FILE* f, void * lf_ctx)
 {
     size_t const writtenSize = fwrite(buf, eltSize, nbElt, f);
     size_t const expectedSize = eltSize * nbElt;
     //assert(expectedSize / nbElt == eltSize);   /* check overflow */
     if (writtenSize < expectedSize) {
         if (ferror(f))  /* note : ferror() must follow fwrite */
-            fprintf(stderr, "Write failed \n");
+            fprintf(((AlertStenographerCtx *)lf_ctx)->fptr, "Write to pcap file failed \n");
         else
-            fprintf(stderr, "Short write \n");
+            fprintf(((AlertStenographerCtx *)lf_ctx)->fptr, "Short write \n");
+        fflush(((AlertStenographerCtx *)lf_ctx)->fptr);
     }
 }
 
@@ -81,7 +82,7 @@ static const LZ4F_preferences_t kPrefs = {
     { LZ4F_max256KB, LZ4F_blockLinked, LZ4F_noContentChecksum, LZ4F_frame, 0, 0, LZ4F_noContentChecksum },
     0,   /* compression level; 0 == default */
     0,   /* autoflush */
-    { 0, 0, 0, 0 },
+     0, 0, 0, 0 ,
 };
 
 
@@ -96,7 +97,8 @@ static compressResult_t
 compress_file_internal(const char* f_in, FILE* f_out,
                        LZ4F_compressionContext_t ctx,
                        void* inBuff,  size_t inChunkSize,
-                       void* outBuff, size_t outCapacity)
+                       void* outBuff, size_t outCapacity,
+                       void* lf_ctx)
 {
     compressResult_t result = { 1, 0, 0 };  /* result for an error */
     unsigned long long count_in = 0, count_out;
@@ -114,7 +116,7 @@ compress_file_internal(const char* f_in, FILE* f_out,
         }
         count_out = headerSize;
         // printf("Buffer size is %u bytes, header size %u bytes \n", (unsigned)outCapacity, (unsigned)headerSize);
-        safe_fwrite(outBuff, 1, headerSize, f_out);
+        safe_fwrite(outBuff, 1, headerSize, f_out, lf_ctx);
     }
 
     /* stream file */
@@ -132,7 +134,7 @@ compress_file_internal(const char* f_in, FILE* f_out,
         }
 
         if(compressedSize) {
-            safe_fwrite(outBuff, 1, compressedSize, f_out);
+            safe_fwrite(outBuff, 1, compressedSize, f_out, lf_ctx);
             count_out += compressedSize;
         }
 
@@ -146,7 +148,7 @@ compress_file_internal(const char* f_in, FILE* f_out,
         }
 
         // printf("Writing %u bytes \n", (unsigned)compressedSize);
-        safe_fwrite(outBuff, 1, compressedSize, f_out);
+        safe_fwrite(outBuff, 1, compressedSize, f_out, lf_ctx);
         count_out += compressedSize;
     }
 
@@ -177,7 +179,7 @@ int LogStenographerFileWrite(void *lf_ctx, const char *file_path, const char* st
   res = curl_global_init(CURL_GLOBAL_DEFAULT);
   /* Check for errors */ 
   if(res != CURLE_OK) {
-    fprintf(stderr, "curl_global_init() failed: %s\n",
+    fprintf(((AlertStenographerCtx *)lf_ctx)->fptr, "curl_global_init() failed: %s\n",
             curl_easy_strerror(res));
     return 1;
   }
@@ -192,13 +194,10 @@ int LogStenographerFileWrite(void *lf_ctx, const char *file_path, const char* st
     
     curl_easy_setopt(curl, CURLOPT_PORT, 1234L);
 
-    curl_easy_setopt(curl, CURLOPT_SSLCERT, "/etc/stenographer/certs/client_cert.pem");
-    
+    curl_easy_setopt(curl, CURLOPT_SSLCERT, ((AlertStenographerCtx *)lf_ctx)->client_cert);
     curl_easy_setopt(curl, CURLOPT_SSLKEYTYPE, "PEM");
-        
-    curl_easy_setopt(curl, CURLOPT_SSLKEY, "/etc/stenographer/certs/client_key.pem");
-    
-    curl_easy_setopt(curl, CURLOPT_CAINFO, "/etc/stenographer/certs/ca_cert.pem");
+    curl_easy_setopt(curl, CURLOPT_SSLKEY, ((AlertStenographerCtx *)lf_ctx)->client_key);
+    curl_easy_setopt(curl, CURLOPT_CAINFO, ((AlertStenographerCtx *)lf_ctx)->ca_cert);
 
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postthis);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(postthis));
@@ -210,9 +209,11 @@ int LogStenographerFileWrite(void *lf_ctx, const char *file_path, const char* st
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
     CURLcode res = curl_easy_perform(curl);
     
-    if(res != CURLE_OK)
-      fprintf(stderr, "curl_easy_perform() failed: %s\n",
-              curl_easy_strerror(res));
+    if(res != CURLE_OK) {
+      fprintf(((AlertStenographerCtx *)lf_ctx)->fptr, "Request to stenographer failed: %s\n", curl_easy_strerror(res));
+      fflush(((AlertStenographerCtx *)lf_ctx)->fptr);
+      return 0;
+    }
     FILE *fptr;
     const char * dir = ((AlertStenographerCtx *)lf_ctx)->pcap_dir;
     char *result = malloc(strlen(dir) + strlen(file_path) + 6); // +1 for the null-terminator
@@ -236,9 +237,10 @@ int LogStenographerFileWrite(void *lf_ctx, const char *file_path, const char* st
            result = compress_file_internal(chunk.memory, fptr,
                                            ctx,
                                            src, chunk.size,
-                                           outbuff, outbufCapacity);
+                                           outbuff, outbufCapacity, lf_ctx);
        } else {
-           printf("error : ressource allocation failed \n");
+           fprintf(((AlertStenographerCtx *)lf_ctx)->fptr, "error : lz4 resource allocation failed \n");
+           fflush(((AlertStenographerCtx *)lf_ctx)->fptr);
        }
    
        LZ4F_freeCompressionContext(ctx);   /* supports free on NULL */
