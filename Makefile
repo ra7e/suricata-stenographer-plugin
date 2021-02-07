@@ -1,5 +1,6 @@
 SRCS :=		template.c \
-			util-stenographer.c
+			util-stenographer.c \
+			cQueue.c
 
 ifeq ($(PREFIX),)
     PREFIX := /usr/local
