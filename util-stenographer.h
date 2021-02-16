@@ -50,6 +50,9 @@ typedef struct AlertStenographerCtx_ {
     unsigned long cleanup_expiry_time;
     unsigned long min_disk_space_left;
     FILE *fptr;
+
+    bool command_pipe_enabled;
+    int command_pipe_fd;
     
     pthread_mutex_t pcap_saver_mutex;
     pthread_t pcap_saver_thread;

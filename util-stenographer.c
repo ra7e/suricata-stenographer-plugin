@@ -28,14 +28,16 @@
 #include <lz4frame.h>
 #include <string.h>
 #include <stdlib.h>
-
+#include <errno.h>
 #include <curl/curl.h>
 
+/*
 static const char * stenographer_url = "https://127.0.0.1/query";
 static long  stenographer_port = 1234L;
 static const char * stenographer_client_cert_file_path = "/etc/nsm/stenographer/certs/client_cert.pem";
 static const char * stenographer_client_key_file_path = "/etc/nsm/stenographer/certs/client_key.pem";
 static const char * stenographer_ca_cert_file_path = "/etc/nsm/stenographer/certs/ca_cert.pem";
+*/
 
 struct MemoryStruct {
   char *memory;
@@ -225,7 +227,12 @@ int LogStenographerFileWrite(void *lf_ctx, const char *file_path, const char* st
     
     if(((AlertStenographerCtx *)lf_ctx)->compression) {
       strcat(result, ".lz4");
-    fptr = fopen(result, "wb");
+      fptr = fopen(result, "wb");
+      if(fptr == NULL) {
+        fprintf(((AlertStenographerCtx *)lf_ctx)->fptr, "Error opening file %s: %s\n", result, strerror(errno));
+        fflush(((AlertStenographerCtx *)lf_ctx)->fptr);
+        return 0;
+      }
       LZ4F_compressionContext_t ctx;
        size_t const ctxCreation = LZ4F_createCompressionContext(&ctx, LZ4F_VERSION);
        void* const src = malloc(chunk.size);
@@ -251,7 +258,15 @@ int LogStenographerFileWrite(void *lf_ctx, const char *file_path, const char* st
     else {
       strcat(result, ".pcap");
       fptr = fopen(result, "w");
-      fwrite(chunk.memory, sizeof(char), chunk.size, fptr);
+      if(fptr == NULL) {
+        fprintf(((AlertStenographerCtx *)lf_ctx)->fptr, "Error opening file %s: %s\n", result, strerror(errno));
+        fflush(((AlertStenographerCtx *)lf_ctx)->fptr);
+        return 0;
+      }
+      if(fwrite(chunk.memory, sizeof(char), chunk.size, fptr) != chunk.size) {
+        fprintf(((AlertStenographerCtx *)lf_ctx)->fptr, "Error writing to file %s: %s\n", result, strerror(errno));
+        fflush(((AlertStenographerCtx *)lf_ctx)->fptr);
+      }
     }
     fclose(fptr);
 

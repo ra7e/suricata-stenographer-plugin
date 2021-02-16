@@ -51,13 +51,40 @@ long GetAvailableDiskSpace(const char* path) {
  * holding multiple alerts. */
 #define MAX_STENOGRAPHER_BUFFER_SIZE (2 * MAX_STENOGRAPHER_ALERT_SIZE)
 
+void getAlertFromFifo(AlertStenographerCtx *ctx) {
+    char external_alert[80];
+
+    if(read(ctx->command_pipe_fd, external_alert, sizeof(external_alert)) <= 0){
+        return;
+    }
+
+    struct timeval current_time;
+    gettimeofday(&current_time, NULL);
+
+    struct timeval end_time;
+    end_time.tv_sec = current_time.tv_sec + ctx->after_time;
+    end_time.tv_usec = current_time.tv_usec;
+    
+    struct timeval start_time;
+    start_time.tv_sec = current_time.tv_sec - ctx->before_time;
+    start_time.tv_usec = current_time.tv_usec;
+
+    Alert alert = {start_time, end_time, current_time, external_alert};
+    pthread_mutex_lock(&ctx->pcap_saver_mutex);
+    q_push(&ctx->alert_queue, &alert);
+    pthread_mutex_unlock(&ctx->pcap_saver_mutex);
+
+}
+
 void* savePcap(void *data) {
     AlertStenographerCtx *ctx = (AlertStenographerCtx *)data;
     
     while (1) {
 
         sleep(1);
+        getAlertFromFifo(ctx);
         pthread_mutex_lock(&ctx->pcap_saver_mutex);
+
         Alert current_alert;
         struct timeval current_time;
         gettimeofday(&current_time, NULL);
@@ -182,6 +209,9 @@ static void TemplateClose(void *data) {
 
     if (ctx != NULL) {
         fclose(ctx->fptr);
+        if(ctx->command_pipe_enabled) {
+            close(ctx->command_pipe_fd);
+        }
         SCFree(ctx);
     }
     pthread_cancel(ctx->pcap_saver_thread);
@@ -217,6 +247,28 @@ static int TemplateOpen(ConfNode *conf, void **data) {
         SCLogError(SC_ERR_LOGDIR_CONFIG, "Stenographer cert directory \"%s\" "
                 "doesn't exist. Shutting down the engine", pcap_dir);
         exit(EXIT_FAILURE);
+    }
+
+    bool command_pipe_enabled = false;
+    int command_pipe_fd = -1;
+    const char * command_pipe = ConfNodeLookupChildValue(conf, "command-pipe");
+
+    if (command_pipe != NULL) {
+    if (!ConfValIsFalse(command_pipe)) {
+        command_pipe_enabled = true;
+        
+        if(mkfifo(command_pipe, 0666) != 0) {
+            SCLogError(SC_ERR_LOGDIR_CONFIG, "Suricata-Stenographer plugin cannot create fifo file \"%s\" "
+                ". Shutting down the engine", command_pipe);
+            exit(EXIT_FAILURE);
+        }
+        
+        if((command_pipe_fd = open(command_pipe, O_RDONLY)) < 0) {
+            //SCLogError(SC_ERR_LOGDIR_CONFIG, "Suricata-Stenographer plugin cannot create fifo file \"%s\" "
+            //    ". Shutting down the engine", command_pipe);
+            //exit(EXIT_FAILURE);
+        }
+    }
     }
 
     const char * s_before_time = ConfNodeLookupChildValue(conf, "before-time");
@@ -319,6 +371,8 @@ static int TemplateOpen(ConfNode *conf, void **data) {
     ctx->client_key = client_key;
     ctx->ca_cert = ca_cert;
 
+    ctx->command_pipe_enabled = command_pipe_enabled;
+    ctx->command_pipe_fd = command_pipe_fd;
     
     ctx->cleanup_expiry_time = expiry_time;
     ctx->min_disk_space_left = min_disk_space_left;
