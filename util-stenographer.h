@@ -67,9 +67,8 @@ typedef struct Alert_ {
 	struct timeval end_time;
     struct timeval alert_time;
     const char *buffer;
+    const char *name;
 } Alert;
-
-#include <curl/curl.h>
 
 static int IsDirectoryWritable(const char* dir)
 {
@@ -94,8 +93,7 @@ static int IsLogDirectoryWritable(const char* str)
     return 0;
 }
 
-void SCLogStenographerInit(char *url, long port,
-    char *pCertFile, char *pKeyName, char * pCACertFile);
+void SCLogStenographerInit(char *url, long port, char *pCertFile, char *pKeyName, char * pCACertFile);
 int LogStenographerFileWrite(void *lf_ctx, const char *file_path, const char* start_time, const char* end_time);
 
 #endif /* __UTIL_STENOGRAPHER_H__ */

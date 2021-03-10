@@ -2,28 +2,35 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h> 
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <sys/statvfs.h>
+#include <time.h>
+
+#include "cleanup.h"
 #include "util-misc.h"
 #include "util-time.h"
 #include "suricata-plugin.h"
 #include "util-debug.h"
 #include "util-stenographer.h"
-#include <dirent.h>
-#include <sys/stat.h>
 
 #define OUTPUT_NAME "stenographer-plugin"
 
-int CleanupOldest (const char *dirname, time_t expiry, const char * script_before_cleanup, FILE *fptr);
-
-#include <sys/statvfs.h>
-#include <time.h>
-
-void CreateIsoTimeStringNoMS (const struct timeval *ts, char *str, size_t size)
+/**
+ * @brief Formating timeval to readable format  
+ * 
+ * @param ts pointer to timeval struct
+ * @param str pointer to destination string
+ * @param size max number of bytes that will be written to str
+ */
+static void CreateIsoTimeStringNoMS (const struct timeval *ts, char *str, size_t size)
 {
-    const time_t time = ts->tv_sec;
+    const time_t time = ts->tv_sec; //store seconds to $time, time_t consider only seconds
     struct tm local_tm;
-    memset(&local_tm, 0, sizeof(local_tm));
-    struct tm *t = gmtime(&time);
-    char time_fmt[64] = { 0 };
+    memset(&local_tm, 0, sizeof(local_tm)); //fill $local_tm with zeros to avoid troubles 
+    struct tm *t = gmtime(&time); // convert time_t format to tm, means convert big number of seconds to acceptable format
+    char time_fmt[64] = { 0 }; 
 
     if (likely(t != NULL)) {
         strftime(time_fmt, sizeof(time_fmt), "%Y-%m-%dT%H:%M:%SZ", t);
@@ -32,16 +39,19 @@ void CreateIsoTimeStringNoMS (const struct timeval *ts, char *str, size_t size)
         snprintf(str, size, "ts-error");
     }
 }
-
-long GetAvailableDiskSpace(const char* path) {
+/**
+ * @brief Get the Available Disk Space object
+ * 
+ * @param path path to any file in mounted filesystem
+ * @return long returns value of free disk space in bytes
+ */
+static long GetAvailableDiskSpace(const char* path) {
     struct statvfs stat;
 
   if (statvfs(path, &stat) != 0) {
     // error happens, just quits here
     return -1;
   }
-
-  // the available size is f_bsize * f_bavail
   return stat.f_bsize * stat.f_bavail;
 }
 
@@ -50,137 +60,191 @@ long GetAvailableDiskSpace(const char* path) {
 /* The largest alert buffer that will be written at one time, possibly
  * holding multiple alerts. */
 #define MAX_STENOGRAPHER_BUFFER_SIZE (2 * MAX_STENOGRAPHER_ALERT_SIZE)
+#define SIZE 33     //maximum lenght of external alert   
 
+/**
+ * @brief Reads up to 33 symbols of alert name from named pipe \    
+ *        stores name and time parameters into "Alert" struct \
+ *        then push struct to alert queue
+ * 
+ * @param ctx global structure
+ */
 void getAlertFromFifo(AlertStenographerCtx *ctx) {
-    char external_alert[80];
+    
+    char *buf = malloc(sizeof(char) * SIZE+1);
 
-    if(read(ctx->command_pipe_fd, external_alert, sizeof(external_alert)) <= 0){
+    if(NULL == buf)
+    {
+        fprintf(ctx->fptr, "Error trying allocate memory");
         return;
     }
 
-    struct timeval current_time;
-    gettimeofday(&current_time, NULL);
+    memset(buf, 0, sizeof(buf));
 
-    struct timeval end_time;
-    end_time.tv_sec = current_time.tv_sec + ctx->after_time;
-    end_time.tv_usec = current_time.tv_usec;
+    if(ctx->command_pipe_fd <= 2){
+        fprintf(ctx->fptr, "Invalid file descriptor for named pipe-[%d]\n", ctx->command_pipe_fd);
+        return;
+    }
+
+    ssize_t data = 0;
+    while (data = read(ctx->command_pipe_fd, buf, SIZE+1) > 0){}
     
-    struct timeval start_time;
-    start_time.tv_sec = current_time.tv_sec - ctx->before_time;
-    start_time.tv_usec = current_time.tv_usec;
+    if(strlen(buf))
+    {
+        size_t length = strlen(buf);
+        buf[length -1] = '\0';
 
-    Alert alert = {start_time, end_time, current_time, external_alert};
-    pthread_mutex_lock(&ctx->pcap_saver_mutex);
-    q_push(&ctx->alert_queue, &alert);
-    pthread_mutex_unlock(&ctx->pcap_saver_mutex);
+        struct timeval current_time;
+        gettimeofday(&current_time, NULL);
 
+        struct timeval end_time;
+        end_time.tv_sec = current_time.tv_sec + ctx->after_time;
+        end_time.tv_usec = current_time.tv_usec;
+        
+        struct timeval start_time;
+        start_time.tv_sec = current_time.tv_sec - ctx->before_time;
+        start_time.tv_usec = current_time.tv_usec;
+
+        Alert alert = {start_time, end_time, current_time, buf, buf};
+        
+        pthread_mutex_lock(&ctx->pcap_saver_mutex);
+        q_push(&ctx->alert_queue, &alert);
+        pthread_mutex_unlock(&ctx->pcap_saver_mutex);
+    }
 }
-
+/**
+ * @brief Main function, handle all alerts \ 
+ *        creates .pcap filenames and call \
+ *        write to disk function 
+ * 
+ * @param data global variable struct
+ * @return void* pointer to savePcap function
+ */
 void* savePcap(void *data) {
     AlertStenographerCtx *ctx = (AlertStenographerCtx *)data;
-    
-    while (1) {
-
+    while (1) 
+    {
         sleep(1);
         getAlertFromFifo(ctx);
         pthread_mutex_lock(&ctx->pcap_saver_mutex);
-
         Alert current_alert;
         struct timeval current_time;
         gettimeofday(&current_time, NULL);
-        while(!q_isEmpty(&ctx->alert_queue)) {
+
+        while(!q_isEmpty(&ctx->alert_queue)) 
+        {
+            if(!q_peek(&ctx->alert_queue, &current_alert)) {
+                goto end_current_check;
+            }
+            // cannot create pcap now (end time is in future (cannot save packets from future))
+            if (current_alert.end_time.tv_sec > current_time.tv_sec) {
+                pthread_mutex_unlock(&ctx->pcap_saver_mutex);
+                goto end_current_check;
+            }
+        
+            q_pop(&ctx->alert_queue, &current_alert);
             
-        if(!q_peek(&ctx->alert_queue, &current_alert)) {
-            goto end_current_check;
-        }
+            char timebuf[64];
+            
+            CreateTimeString(&current_alert.alert_time, timebuf, sizeof(timebuf));
+        
+            char stenographerPcapAlertFile_time[64] = {0}; 
+            char stenographerPcapAlertFile_full[128] = {0};
 
-        // cannot create pcap now (end time is in future (cannot save packets from future))
-        if (current_alert.end_time.tv_sec > current_time.tv_sec) {
-            pthread_mutex_unlock(&ctx->pcap_saver_mutex);
-            goto end_current_check;
-        }
-        
-        q_pop(&ctx->alert_queue, &current_alert);
-        
-        char timebuf[64];
-        
-        CreateTimeString(&current_alert.alert_time, timebuf, sizeof(timebuf));
-        
-        char stenographerPcapAlertFile[64];
-        //sprintf(stenographerPcapAlertFile, "%s-%s-%s", "alert", "test", timebuf);
-        CreateIsoTimeString(&current_alert.alert_time, stenographerPcapAlertFile, sizeof(stenographerPcapAlertFile));
-        
-        
-        char alert_buffer[MAX_STENOGRAPHER_BUFFER_SIZE];
-        fprintf(ctx->fptr, "%s\n", current_alert.buffer);
-        
-        if(ctx->compression) {
-            fprintf(ctx->fptr, "Alert Pcap saved to file : %s.lz4 \n", stenographerPcapAlertFile);
-        }
-        else {
-            fprintf(ctx->fptr, "Alert Pcap saved to file : %s.pcap \n", stenographerPcapAlertFile);
-        }
-        fflush(ctx->fptr);
+            strcpy(stenographerPcapAlertFile_full, current_alert.name);
+            
+            free((char*)current_alert.name);
+            
+            CreateIsoTimeString(&current_alert.alert_time, stenographerPcapAlertFile_time, sizeof(stenographerPcapAlertFile_time));
+            
+            strcat(stenographerPcapAlertFile_full, ".");
+            strcat(stenographerPcapAlertFile_full, stenographerPcapAlertFile_time);
+            
+            printf("Full name - %s\n", stenographerPcapAlertFile_full);
 
-        char end_timebuf[64];
-        CreateIsoTimeStringNoMS(&current_alert.end_time, end_timebuf, sizeof(end_timebuf));
-        
-        char start_timebuf[64];
-        CreateIsoTimeStringNoMS(&current_alert.start_time, start_timebuf, sizeof(start_timebuf));
+            char alert_buffer[MAX_STENOGRAPHER_BUFFER_SIZE];
+            fprintf(ctx->fptr, "%s\n", current_alert.buffer);
+            
+            if(ctx->compression) {
+                fprintf(ctx->fptr, "Alert Pcap saved to file : %s.lz4 \n", stenographerPcapAlertFile_full);
+            }
+            else {
+                fprintf(ctx->fptr, "Alert Pcap saved to file : %s.pcap \n", stenographerPcapAlertFile_full);
+            }
+            fflush(ctx->fptr);
 
-        if(ctx->cleanup) {
-            if(ctx->cleanup_expiry_time) {
-                int files_deleted = CleanupOldest(ctx->pcap_dir, ctx->cleanup_expiry_time, ctx->cleanup_script, ctx->fptr);
-                if(files_deleted) {
-                    char cleanup_message[MAX_STENOGRAPHER_BUFFER_SIZE];
-                    int cleanup_size = 0;
-                    snprintf(cleanup_message, MAX_STENOGRAPHER_ALERT_SIZE,
-                        "%s Cleanup of the folder '%s' is finished, %d file(s) older than %lu seconds were deleted \n", timebuf, ctx->pcap_dir, files_deleted, ctx->cleanup_expiry_time);
-                    fprintf(ctx->fptr, "%s", cleanup_message);
+            char end_timebuf[64];
+            CreateIsoTimeStringNoMS(&current_alert.end_time, end_timebuf, sizeof(end_timebuf));
+            
+            char start_timebuf[64];
+            CreateIsoTimeStringNoMS(&current_alert.start_time, start_timebuf, sizeof(start_timebuf));
+    
+            if(ctx->cleanup) 
+            {
+                if(!CleanupBegin(ctx, timebuf, GetAvailableDiskSpace(ctx->pcap_dir))){
+                    fprintf(ctx->fptr, "Failed to clean everthing up on \"%s\" file\n", stenographerPcapAlertFile_full);
                 }
             }
-            if(ctx->min_disk_space_left) {
-                if(ctx->min_disk_space_left > GetAvailableDiskSpace(ctx->pcap_dir)) {
-                    int files_deleted = CleanupOldest(ctx->pcap_dir, 0, ctx->cleanup_script, ctx->fptr);
-                    if(files_deleted) {
-                        char cleanup_message[MAX_STENOGRAPHER_BUFFER_SIZE];
-                        int cleanup_size = 0;
-                        snprintf(cleanup_message, MAX_STENOGRAPHER_ALERT_SIZE,
-                            "%s Cleanup of the folder '%s' is finished, %d file(s) were deleted, %lu bytes of empty space left \n", timebuf, ctx->pcap_dir, files_deleted, GetAvailableDiskSpace(ctx->pcap_dir));
-                        fprintf(ctx->fptr, "%s", cleanup_message);
-                    }
-                }
-            }
-        }
-            LogStenographerFileWrite((void *)ctx, stenographerPcapAlertFile, start_timebuf, end_timebuf);
+            LogStenographerFileWrite((void *)ctx, stenographerPcapAlertFile_full, start_timebuf, end_timebuf);
         }
         end_current_check:
         pthread_mutex_unlock(&ctx->pcap_saver_mutex);
 
     }
 }
-
-static int TemplateWrite(const char *buffer, int buffer_len, void *data) {
-
+/**
+ * @brief Process string to JSON object \
+ *        pars current object and store to "Alert" structure
+ *        with time parameteres 
+ * 
+ * @param buffer JSON string
+ * @param buffer_len length of JSON string
+ * @param data global variable struct
+ * @return int 0 on success or lack of "alert", otherwise -1
+ */
+static int TemplateWrite(const char *buffer, int buffer_len, void *data) 
+{
     json_t *root;
     json_error_t error;
     AlertStenographerCtx *ctx = data;
 
     root = json_loadb(buffer, buffer_len, 0, &error);
+    char *name;
 
-    if (root) {
+    if (root) 
+    {
         json_t * type = json_object_get(root, "event_type");
         json_t * proto = json_object_get(root, "proto");
-        if (strcmp(json_string_value(type), "alert") != 0) {
-            json_decref(root);
+        if (strcmp(json_string_value(type), "alert") == 0) 
+        {
+            json_t *key_alert = json_object_get(root, "alert");
+            if(json_is_object(key_alert))
+            {
+                json_t *signature = json_object_get(key_alert, "signature");
+                if(!json_is_string(signature)){
+                    fprintf(ctx->fptr, "Error parsing JSON, can`t find 'signature'\n");
+                    name = "SuricataAlert.";
+                    json_decref(key_alert);
+        
+                }else{
+                    name = malloc(sizeof(char) * 20);  
+                    strcpy(name, json_string_value(signature));
+                }
+            }
+            else
+            {
+                name = "SuricataAlert.\0";    
+            }
+        }
+        else{
             return 0;
         }
-    } else {
+    }else {
+        fprintf(ctx->fptr, "Error crearing new JSON reference\n");
         json_decref(root);
-        return 0;
+        return 1;
     }
-    json_decref(root);
-    
+
     int i;
     int decoder_event = 0;
     struct timeval current_time;
@@ -194,17 +258,29 @@ static int TemplateWrite(const char *buffer, int buffer_len, void *data) {
     start_time.tv_sec = current_time.tv_sec - ctx->before_time;
     start_time.tv_usec = current_time.tv_usec;
 
-    Alert alert = {start_time, end_time, current_time, buffer};
+    Alert alert = {start_time, end_time, current_time, buffer, name};
 
+    //printf("alert.name - %s\n", alert.name);
+    
     pthread_mutex_lock(&ctx->pcap_saver_mutex);
-    q_push(&ctx->alert_queue, &alert);
+    if(!q_push(&ctx->alert_queue, &alert))
+    {
+        fprintf(ctx->fptr, "Queue is full\n");
+    }
+       
     pthread_mutex_unlock(&ctx->pcap_saver_mutex);
+
+    json_decref(root);
 
     return 0;
 }
-
+/**
+ * @brief Close working flow
+ * 
+ * @param data global variable struct 
+ */
 static void TemplateClose(void *data) {
-    //printf("TemplateClose\n");
+
     AlertStenographerCtx *ctx = data;
 
     if (ctx != NULL) {
@@ -215,10 +291,16 @@ static void TemplateClose(void *data) {
         SCFree(ctx);
     }
     pthread_cancel(ctx->pcap_saver_thread);
-    
 }
-
+/**
+ * @brief Pars configuration file .yaml and store results to AlertStenographerCtx struct
+ * 
+ * @param conf pointer to ConfNode 
+ * @param data global variable struct
+ * @return int 0 on success
+ */
 static int TemplateOpen(ConfNode *conf, void **data) {
+
     AlertStenographerCtx *ctx;
     
     const char * pcap_dir = ConfNodeLookupChildValue(conf, "pcap-dir");
@@ -253,40 +335,47 @@ static int TemplateOpen(ConfNode *conf, void **data) {
     int command_pipe_fd = -1;
     const char * command_pipe = ConfNodeLookupChildValue(conf, "command-pipe");
 
-    if (command_pipe != NULL) {
-    if (!ConfValIsFalse(command_pipe)) {
-        command_pipe_enabled = true;
-        
-        if(mkfifo(command_pipe, 0666) != 0) {
-            SCLogError(SC_ERR_LOGDIR_CONFIG, "Suricata-Stenographer plugin cannot create fifo file \"%s\" "
-                ". Shutting down the engine", command_pipe);
-            exit(EXIT_FAILURE);
+    if (command_pipe != NULL) 
+    {
+        if (!ConfValIsFalse(command_pipe)) {
+            command_pipe_enabled = true;
+
+            if((command_pipe_fd = open(command_pipe, 0666 | O_NONBLOCK)) <= 0)  {
+                printf("Cant open - %s\n", command_pipe);
+                if(mkfifo(command_pipe, 0666) != 0) {
+                    printf("Cant create pipe - %s\n", command_pipe);
+                    SCLogError(SC_ERR_LOGDIR_CONFIG, "Suricata-Stenographer plugin cannot create fifo file \"%s\" "
+                        ". Shutting down the engine", command_pipe);
+                    exit(EXIT_FAILURE);
+                } 
+                if((command_pipe_fd = open(command_pipe, 0666)) <= 0)
+                {
+                    SCLogError(SC_ERR_LOGDIR_CONFIG, "Suricata-Stenographer plugin cannot create fifo file \"%s\" "
+                        ". Shutting down the engine", command_pipe);
+                    exit(EXIT_FAILURE);
+                }   
+            }
+            printf("Pipe name is - %s fd - %d \n", command_pipe, command_pipe_fd);
         }
-        
-        if((command_pipe_fd = open(command_pipe, O_RDONLY)) < 0) {
-            //SCLogError(SC_ERR_LOGDIR_CONFIG, "Suricata-Stenographer plugin cannot create fifo file \"%s\" "
-            //    ". Shutting down the engine", command_pipe);
-            //exit(EXIT_FAILURE);
-        }
-    }
     }
 
     const char * s_before_time = ConfNodeLookupChildValue(conf, "before-time");
 
     uint32_t before_time = 0;
     if (s_before_time != NULL) {
-        if (ParseSizeStringU32(s_before_time, &before_time) < 0) {
+        if ((before_time = SCParseTimeSizeString(s_before_time)) == 0) {
             SCLogError(SC_ERR_INVALID_ARGUMENT,
-                "Failed to initialize pcap output, invalid limit: %d", before_time);
+                "Failed to initialize before time, invalid value: %s", s_before_time);
                 exit(EXIT_FAILURE);
         }
     }
+
     const char * s_after_time = ConfNodeLookupChildValue(conf, "after-time");
     uint32_t after_time = 0;
     if (s_after_time != NULL) {
-        if (ParseSizeStringU32(s_after_time, &after_time) < 0) {
+         if ((after_time = SCParseTimeSizeString(s_after_time)) == 0) {
             SCLogError(SC_ERR_INVALID_ARGUMENT,
-                "Failed to initialize pcap output, invalid limit: %d", after_time);
+                "Failed to initialize after time, invalid value: %s", s_after_time);
             exit(EXIT_FAILURE);
         }
     }
@@ -298,7 +387,6 @@ static int TemplateOpen(ConfNode *conf, void **data) {
     }
 
     int no_overlapping = 0;
-
     
     const char * s_no_overlapping = ConfNodeLookupChildValue(conf, "no-overlapping");
     if(ConfValIsTrue(s_no_overlapping)) {
@@ -314,6 +402,7 @@ static int TemplateOpen(ConfNode *conf, void **data) {
     uint64_t expiry_time = 0;
     uint64_t min_disk_space_left = 0;
     if (cleanup_node != NULL && ConfNodeChildValueIsTrue(cleanup_node, "enabled")) {
+        
         cleanup = 1;
         const char *script = ConfNodeLookupChildValue(cleanup_node, "script");
 
@@ -326,13 +415,13 @@ static int TemplateOpen(ConfNode *conf, void **data) {
                 "doesn't exist. Shutting down the engine", pcap_dir);
                 exit(EXIT_FAILURE);
         }
+
         const char * s_expiry_time = ConfNodeLookupChildValue(cleanup_node, "expiry-time");
     
         if (s_expiry_time != NULL) {
-            if (ParseSizeStringU64(s_expiry_time, &expiry_time) < 0) {
+            if ((expiry_time = SCParseTimeSizeString(s_expiry_time)) == 0) {
                 SCLogError(SC_ERR_INVALID_ARGUMENT,
-                    "Failed to initialize pcap output, invalid limit: %d",
-                    after_time);
+                    "Failed to initialize expiry time, invalid limit: %ld", expiry_time);
                 exit(EXIT_FAILURE);
             }
         }
@@ -342,8 +431,7 @@ static int TemplateOpen(ConfNode *conf, void **data) {
         if (s_min_disk_space_left != NULL) {
             if (ParseSizeStringU64(s_min_disk_space_left, &min_disk_space_left) < 0) {
                 SCLogError(SC_ERR_INVALID_ARGUMENT,
-                    "Failed to initialize pcap output, invalid limit: %d",
-                    after_time);
+                    "Failed to initialize pcap output, invalid limit: %ld", min_disk_space_left);
                 exit(EXIT_FAILURE);
             }
         }
@@ -361,10 +449,28 @@ static int TemplateOpen(ConfNode *conf, void **data) {
     ctx->cleanup_script = cleanup_script;
     
     char *client_cert = (char *)malloc(strlen(cert_dir) + 15);
-    sprintf(client_cert, "%s%s", cert_dir, "client_cert.pem");
+    
+    if(NULL == client_cert){
+        SCLogError(SC_ERR_MEM_ALLOC, "Failed to allocate memory");
+        exit(EXIT_FAILURE);
+    }
+
     char *client_key = (char *)malloc(strlen(cert_dir) + 14);
-    sprintf(client_key, "%s%s", cert_dir, "client_key.pem");
+    
+    if(NULL == client_key){
+        SCLogError(SC_ERR_MEM_ALLOC, "Failed to allocate memory");
+        exit(EXIT_FAILURE);
+    }
+
     char *ca_cert = (char *)malloc(strlen(cert_dir) + 11);
+    
+    if(NULL == ca_cert){
+        SCLogError(SC_ERR_MEM_ALLOC, "Failed to allocate memory");
+        exit(EXIT_FAILURE);
+    }
+
+    sprintf(client_cert, "%s%s", cert_dir, "client_cert.pem");
+    sprintf(client_key, "%s%s", cert_dir, "client_key.pem");
     sprintf(ca_cert, "%s%s", cert_dir, "ca_cert.pem");
 
     ctx->client_cert = client_cert;
@@ -380,74 +486,20 @@ static int TemplateOpen(ConfNode *conf, void **data) {
 
     *data = ctx;
 
-    pthread_create(&ctx->pcap_saver_thread, NULL, savePcap, (void *)ctx);
-    pthread_mutex_init ( &ctx->pcap_saver_mutex, NULL);
+    if(pthread_create(&ctx->pcap_saver_thread, NULL, savePcap, (void *)ctx) != 0)
+    {  
+        SCLogError(SC_ERR_THREAD_CREATE, "Can`t create new thread\n");
+        exit(EXIT_FAILURE);
+    }
+
+    pthread_mutex_init(&ctx->pcap_saver_mutex, NULL);
     return 0;
 }
 
-int CleanupOldest (const char *dirname, time_t expiry,const char * script_before_cleanup, FILE * fptr) {
-
-    int script_run = 0;
-    DIR * directory; 
-    struct stat buf;
-    struct dirent *entry;
-    int retcode, num_ents;
-    char *filename, *cwd;
-    time_t now;
-
-    num_ents = 0; /* Number of entries left in current directory */
-
-    /* Open target directory */
-    directory = opendir(dirname);
-    if (directory == NULL) {
-        //fprintf(stderr, "%s: ", dirname);
-        fprintf(fptr, "Unable to read directory");
-        return -1;
-    }
-    if ((chdir(dirname) == -1)) {
-        //fprintf(stderr, "%s: ", dirname);
-        fprintf(fptr, "chdir failed");
-        return -1;
-    }
-  
-    /* Process directory contents, deleting all regular files with
-     * mtimes more than expiry seconds in the past */
-
-    now = time(NULL);  
-    while ((entry = readdir(directory))) {
-        filename = entry->d_name;
-
-        /* Ignore '.' and '..' */
-        if (! strcmp(filename,".")  ) { continue; }
-        if (! strcmp(filename,"..") ) { continue; }
-    
-        //num_ents ++; /* New entry, count it */
-    
-        retcode = lstat(filename, &buf);
-        if (retcode == -1) {
-            //fprintf(stderr, "%s: ", filename);
-            fprintf(fptr, "stat failed");
-            continue;
-        }
-
-        if (S_ISREG(buf.st_mode) || S_ISLNK(buf.st_mode)) {
-            /* File or symlink- check last modification time */
-            if ((now - expiry) > buf.st_mtime) {
-                unlink (filename);
-                if(script_run == 0) {
-                    system(script_before_cleanup);
-                    script_run = 1;
-                }
-
-                num_ents ++;
-            }
-        }
-    }
-    closedir(directory);
-    chdir("..");
-    return num_ents;
-}
-
+/**
+ * @brief Assign main plugin functions to Suricata
+ * 
+ */
 void TemplateInit(void)
 {
     SCPluginFileType *my_output = SCCalloc(1, sizeof(SCPluginFileType));
@@ -459,7 +511,10 @@ void TemplateInit(void)
         FatalError(SC_ERR_PLUGIN, "Failed to register filetype plugin: %s", OUTPUT_NAME);
     }
 }
-
+/**
+ * @brief Define parameters of plugin
+ * 
+ */
 const SCPlugin PluginRegistration = {
     .name = OUTPUT_NAME,
     .author = "Vadym Malakhatko <v.malakhatko@sirinsoftware.com>",

@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "util-misc.h": "c",
+        "stdio.h": "c",
+        "cleanup.h": "c",
+        "stat.h": "c",
+        "util-time.h": "c",
+        "util-stenographer.h": "c"
+    }
+}

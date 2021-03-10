@@ -46,6 +46,7 @@ struct MemoryStruct {
 
 static size_t writefunc(void *contents, size_t size, size_t nmemb, void *userp)
 {
+  //printf("\nwritefunc\n");
   size_t realsize = size * nmemb;
   struct MemoryStruct *mem = (struct MemoryStruct *)userp;
  
@@ -68,6 +69,7 @@ static size_t writefunc(void *contents, size_t size, size_t nmemb, void *userp)
  * performs fwrite(), ensure operation success, or immediately exit() */
 static void safe_fwrite(void* buf, size_t eltSize, size_t nbElt, FILE* f, void * lf_ctx)
 {
+   //printf("\nsafe_fwrite\n");
     size_t const writtenSize = fwrite(buf, eltSize, nbElt, f);
     size_t const expectedSize = eltSize * nbElt;
     //assert(expectedSize / nbElt == eltSize);   /* check overflow */
@@ -87,8 +89,6 @@ static const LZ4F_preferences_t kPrefs = {
      0, 0, 0, 0 ,
 };
 
-
-
 typedef struct {
     int error;
     unsigned long long size_in;
@@ -102,6 +102,7 @@ compress_file_internal(const char* f_in, FILE* f_out,
                        void* outBuff, size_t outCapacity,
                        void* lf_ctx)
 {
+   // printf("\ncompres_file_internal\n");
     compressResult_t result = { 1, 0, 0 };  /* result for an error */
     unsigned long long count_in = 0, count_out;
 
@@ -165,11 +166,12 @@ compress_file_internal(const char* f_in, FILE* f_out,
  * \param log_ctx Log file context allocated by caller
  * \param string buffer with data to write
  * \param string_len data length
- * \retval 0 on sucess;
+ * \retval 0 on success;
  * \retval -1 on failure;
  */
 int LogStenographerFileWrite(void *lf_ctx, const char *file_path, const char* start_time, const char* end_time)
 {
+  //printf("\nLogStenographerFileWrite\n");
   struct MemoryStruct chunk;
   chunk.memory = malloc(1);  /* will be grown as needed by realloc above */ 
   chunk.size = 0;
@@ -186,7 +188,12 @@ int LogStenographerFileWrite(void *lf_ctx, const char *file_path, const char* st
     return 1;
   }
 
-  char *postthis = (char *)malloc(70 * sizeof(char)); 
+  char *postthis = (char *)malloc(70 * sizeof(char));
+  if(NULL == postthis)
+  {
+    fprintf(((AlertStenographerCtx *)lf_ctx)->fptr, "Error allocting memory\n");
+    return 2;
+  } 
   sprintf(postthis, "after %s and before %s", start_time, end_time);  
   //printf("reauest: %s\n", postthis);
 
@@ -219,6 +226,11 @@ int LogStenographerFileWrite(void *lf_ctx, const char *file_path, const char* st
     FILE *fptr;
     const char * dir = ((AlertStenographerCtx *)lf_ctx)->pcap_dir;
     char *result = malloc(strlen(dir) + strlen(file_path) + 6); // +1 for the null-terminator
+    if(NULL == result)
+    {
+      fprintf(((AlertStenographerCtx *)lf_ctx)->fptr, "Error allocating memory\n");
+      return -1;
+    }
     // in real code you would check for errors in malloc here
     strcpy(result, dir);
     strcat(result, file_path);
@@ -236,8 +248,18 @@ int LogStenographerFileWrite(void *lf_ctx, const char *file_path, const char* st
       LZ4F_compressionContext_t ctx;
        size_t const ctxCreation = LZ4F_createCompressionContext(&ctx, LZ4F_VERSION);
        void* const src = malloc(chunk.size);
+       if(NULL == src)
+       {
+          fprintf(((AlertStenographerCtx *)lf_ctx)->fptr, "Error allocating memory\n");
+          return 2;
+       }
        size_t const outbufCapacity = LZ4F_compressBound(chunk.size, &kPrefs);   /* large enough for any input <= IN_CHUNK_SIZE */
-       void* const outbuff = malloc(outbufCapacity);
+       void* const outbuff = malloc(outbufCapacity); 
+       if(NULL == outbuff)
+       {
+          fprintf(((AlertStenographerCtx *)lf_ctx)->fptr, "Error allocating memory\n");
+          return 2;
+       }
    
        compressResult_t result = { 1, 0, 0 };  /* == error (default) */
        if (!LZ4F_isError(ctxCreation) && src && outbuff) {

@@ -1,0 +1,17 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "/home/artem/Documents/Work/Suricata/suricata/src/",
+                "/usr/include",
+                "${workspaceFolder}/**"
+            ],
+            "defines": [],
+            "cStandard": "gnu17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "linux-gcc-x64"
+        }
+    ],
+    "version": 4
+}

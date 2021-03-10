@@ -1,14 +1,15 @@
 SRCS :=		template.c \
 			util-stenographer.c \
-			cQueue.c
+			cQueue.c \
+			cleanup.c
 
 ifeq ($(PREFIX),)
     PREFIX := /usr/local
-endif
+endif	
 
 # This needs to point to the Suricata includes.
 
-CPPFLAGS +=	-DSURICATA_PLUGIN -I.
+CPPFLAGS +=	-DSURICATA_PLUGIN -I -g.
 
 LDLIBS += -lcurl
 
